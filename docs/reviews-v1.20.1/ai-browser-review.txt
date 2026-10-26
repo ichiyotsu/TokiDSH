@@ -1,0 +1,76 @@
+# AI 对 dsh-tool-browser 的改进建议 —— 采纳/不采纳记录（v1.20.1）
+
+> 来源：2026-10-17 22:09 设备上的 AI 真实执行 `http://100.105.232.55:8099/form2.html`
+> （输入随机 token → 点提交 → 读回显）。服务端 `/beacon` 留到 input/submit 两条真证据，
+> AI 自己写的 proof：`TOKEN=dsh-b7ec9c21` / `OUT=CLICKED:dsh-b7ec9c21`。
+> 原始建议：`tmp-diag/v1192/ai-deep/review.txt`；原始日志：`ai-deep/run-20261017.log`。
+
+AI 提了 3 条，**全部采纳并实现**（都在自研插件 `release-src/plugins/dsh-tool-browser` 与 App 的
+`BrowserHost.java` 里；内核自带工具一行没动）。
+
+---
+
+## 建议 1｜提交后的回显文本在快照里完全不可见
+
+**AI 原话（摘要）**：`browser_click` 说"页面有变化"后，`browser_snapshot` 仍是 generation=1、节点=2
+（只有 textbox + button），回显 `CLICKED:<token>` 根本没出现；必须再调 `browser_read` 才看到。
+"提交是否成功"无法靠快照确认，会把成功误判成失败。
+
+**采纳**。改法（比 AI 建议的两条都做了一半，理由是"一次调用拿到证据"最省）：
+- `browser_snapshot` 新增参数 `includeText:true`：把可见文本按行返回（`text` 字段，去重、单行截断 200 字、最多 60 行）；
+- `browser_click` / `browser_press` 的返回里**直接带 `newText`**（点击后新出现的可见文本行，最多 8 行）——
+  AI 不用再补一次 read 就能确认提交成功；
+- 差分快照（`since`）也带 `newText` + `textChanged`：纯文字变化不再被判成"页面没变化"。
+
+**证据**（`verify-browser-1201.py`，真机、非 AI 调用）：
+- `snapshot includeText=true` → `text: ["DSH 深度任务页", "...输入任意文本后提交...", "点我提交", "NOT-CLICKED"]`；
+- `click` → `newText: ["CLICKED:dsh-smoke-2026"]`，`fromGeneration:2 → toGeneration:3`。
+
+---
+
+## 建议 2｜click 后 pageGeneration 不递增，since 差分给出假阴性
+
+**AI 原话（摘要）**：点击前 generation=1，点击返回明确说"页面有变化"，紧接着快照 generation 仍是 1、
+内容一模一样；拿 since=1 做差分永远判断不出哪里变了，也无法区分"页面真的没变"和"变的是纯文本节点"。
+
+**采纳**。改法：
+- 页面里注入 `MutationObserver`（childList + characterData + 关键属性 `value/checked/selected/disabled/href/src/class`）
+  与 `input/change` 事件监听，累计 `window.__dshMut`；Java 侧 `syncGeneration()` 在每次 op 前后把
+  "变更计数变了"折算成 `pageGeneration +1`。
+- **只监听关键属性**（不监听 style/动画），避免动画把代次刷爆；
+- 快照的"页面导航了"判据改用独立的 `navGen`（只由 onPageStarted 递增）——DOM 变化不会误报 `stale-page-generation`；
+- `click` / `type` / `press` 返回 `fromGeneration` / `toGeneration`，插件侧声明并渲染；
+- 点击后**不推进文本基线**（基线留在点击前），所以随后 `snapshot{since}` 仍能看到这次点击产生的 `newText`。
+
+**证据**：`type` 返回 `fromGeneration:1 → toGeneration:2`；`click` 返回 `2 → 3`；`snapshot{since:2}` 返回
+`pageGeneration:3` + `newText:["CLICKED:dsh-smoke-2026"]`（verify-browser-1201.py 第 [7][8] 步）。
+
+---
+
+## 建议 3｜browser_read 读输入框返回 "(空)"，读不到 value
+
+**AI 原话（摘要）**：键入成功后对同一个 ref 调 `browser_read` 得到 "(空)"——它读的是 textContent，
+而 input 的值在 value 属性里；没有任何说明，容易被解读成"输入被清空/控件是假的"。
+
+**采纳**。改法：
+- `read` 命中 `input/textarea/select` 时返回结构化字段：`tag` / `type` / `value` / `placeholder` /
+  `disabled` / `field:true`；`select` 返回选中项文本；textContent 为空时**用 value 填充 text**，
+  并在 hint 里写明"输入框的值在 value 里"；
+- `browser_type` 返回 `via`（execCommand / setter）与 `dispatched`（input/change 是否已派发），
+  AI 能判断受控组件（React/Vue）绑定是否生效。
+
+**证据**：`type` → `{via:"execCommand", dispatched:true, value:"dsh-smoke-2026"}`；
+`read` 同一 ref → `{field:true, tag:"input", type:"text", value:"dsh-smoke-2026", placeholder:"在这里输入"}`。
+
+---
+
+## 额外（AI 没提，但同一条链路上踩到的）
+
+- `browser_click` 的 `via` 字段原来**没在插件 output.schema 里声明**，被 `pick()` 丢掉了；
+  本轮补上（AI 看不到"走的是 touch 还是 js 兜底"）。
+- `includeText` / `newText` / `fromGeneration` / `toGeneration` / `field` / `dispatched` 全部进了
+  `verify-v1193.sh` 的包内判据（dex 字符串 + 插件源码），以后改坏会直接 FAIL。
+
+## 未采纳
+
+无（3 条全部采纳）。

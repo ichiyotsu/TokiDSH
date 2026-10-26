@@ -1,0 +1,16 @@
+# 二进制与密钥（不进入仓库）
+*.apk
+*.idsig
+*.tar.aa
+*.tar.ab
+*.tar.ac
+*.tar.ad
+android-app/release.jks
+android-app/sdk/android.jar
+android-app/staging/
+android-app/out/
+android-app/assets/
+.credentials.yaml
+payload.zip
+*.bak
+*.bak-*

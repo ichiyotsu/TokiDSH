@@ -1,0 +1,105 @@
+# AI 对 dsh-tool-accessibility 的改进建议 —— 采纳/不采纳记录（v1.20.1）
+
+> 来源：2026-10-18 07:00-07:05 设备上的 AI 用无障碍工具真实操作了一遍
+> （读屏 → 进插件页 → 滚动/滑动 → 长按 → 触摸 down/up → 返回主控台）。
+> 原始报告：`tmp-diag/v1192/ai-accessibility/review.txt`；驱动日志：`ai-accessibility/run2.log`。
+> 真实副作用证据（AI 记录）：`android_screen` 45 节点、文本含「DEEPSEEK HARNESS / 1.20.0 / 引擎运行中」；
+> `android_see` 截图 720x1570、文件头 `89 50 4e 47`（合法 PNG）；`android_tap(text=插件)` 后 45→38 节点、
+> node[2] 变「‹ 控制台」；反向 swipe 让 dsh-tool-browser 从 y111 回到 y373。
+
+AI 提了 3 条，**全部采纳**（三条都能在插件层实现，不动 App Java，也不需要额外权限）。
+
+---
+
+## 建议 1｜android_a11y_status 只回「操作成功。」，无法判断无障碍是否真的开启
+
+**AI 原话（摘要）**：返回正文只有「操作成功。」，没有 running / 前台包名；不得不额外调
+`android_app(current)` 拿 ActivityRecord、再调 `android_screen` 数 45 个节点，才敢下结论。
+「操作成功」语义上只是 IPC 通了，服务关掉时极易被误读成「无障碍已开启」。
+
+**采纳**。改法（纯插件层）：
+- 新增专用渲染 `renderA11yStatus`，把结构化字段摊开成人话：
+  `无障碍服务：已连接（running=true）` / `服务组件：<包>/.AccessibilityService` /
+  `前台应用：com.deepseek.harness` / `可读控件：45 个` / `能力：读屏 可用 / 手势注入 可用 / 截图 可用` / `Android API：36`。
+- 输出新增字段：`foregroundPackage`（与旧 `package` 同值，保留旧字段兼容）、`serviceName`、
+  `canReadScreen`、`canGesture`；`running`/`nodeCount`/`canScreenshot`/`apiLevel` 原样保留。
+  - `serviceName` 取 `process.env.SHIZUKU_APP_ID`（App 起引擎时注入的 `getPackageName()`），
+    退路是 `TMPDIR` 里的 `/data/user/0/<包>/`，所以正式版 / Lite / 兼容版都自动正确，不是硬编码。
+  - `canReadScreen` = running 且本次真的数到节点；`canGesture` = running 且 API≥24（App 侧
+    `gestureTap` 的同一门槛），都是真实推断，不是常量。
+- 服务不可用时（`/status` 连不上）返回 `{ok:false, running:false, error:<引导文案>}`，
+  渲染成「无障碍服务不可用（running=false）。」+ 引导，而不是干巴巴一条错误。
+
+**证据（改完重跑要看到）**：`android_a11y_status` 的返回正文 !=「操作成功。」，且含
+`running=true`、`前台应用：`、`服务组件：`、`可读控件：N 个`。
+
+---
+
+## 建议 2｜android_scroll / android_swipe 无论有没有位移都回「操作成功」
+
+**AI 原话（摘要）**：上滑 (0.5,0.8→0.5,0.3) 回成功，但前后节点坐标逐条一致（dsh-tool-browser 仍在 y111、
+节点数 39），无法区分「手势没注入成功」和「列表已到底」；只能再补一次反向 swipe 才证明手势是好的。
+
+**采纳**。改法（纯插件层，动作前后各取一次 App 的 `/dump`）：
+- 新增 `dumpSnapshot()` + `snapshotKey()`：指纹 = 包名 + 节点数 + 前 40 个节点的「文字@坐标」。
+- `android_scroll` / `android_swipe` 返回新增：
+  `changed`（真比出来的）、`compared`（前后两次读屏是否都成功）、`atEdge`（**仅 changed=false 时**给：
+  向下滚/上滑→`bottom`，向上滚/下滑→`top`，左右同理）、`nodeCountBefore/After`、`firstTextBefore/After`。
+- 动作后先等 350ms 取快照；指纹没变再补 2 次（每次 +350ms），躲开滚动动画/页面跳转延迟。
+- `atEdge` 的语义是「本次没变化**且**方向已知 ⇒ 到头了」，渲染成
+  `内容变化：否（未检测到变化，已到bottom（不是注入失败））`，直接消除 AI 的误判。
+- 服务端 `/scroll` 自己回 `method:"none"`/「未找到可滚动的区域」时仍保持 `ok:true`（不改变既有
+  回归判据），但渲染里会带上提示；`changed` 依旧按真实对比给。
+
+**证据（改完重跑要看到）**：到底后 `android_swipe` 的正文含 `内容变化：否` 且 `atEdge`/「已到」；
+反向滑动含 `内容变化：是`。
+
+---
+
+## 建议 3｜android_tap 只回「操作成功」，不回命中了哪个节点
+
+**AI 原话（摘要）**：点「插件」时屏上同时有行容器「插件」、「已启用 7/11」、插件页里的标题「插件」，
+无法确认点到的是行容器还是标题，只能靠再读屏对比 45→38 节点反推。
+
+**采纳**。改法（纯插件层，点击前用同一份 `/dump` 推算命中项，点击后再取一次对比）：
+- 文本/描述点击：按与服务端一致的规则做模糊匹配（**精确优先 → 可点击优先**），取第一候选为 `match`；
+- 坐标点击：取包含该点的**最深节点**，并单独找包含该点的最深**可点击**节点（≈ 可点击祖先）；
+- 返回新增：`matchedText`（命中节点的文字，无文字时用 desc）、`matchedDesc`、`bounds{x,y,w,h}`、
+  `nodeIndex`（在 android_screen 列表里的索引，可直接引用）、`clickableAncestor`、
+  `pageChanged`（前后指纹是否变化）、`newTitle`（点击后屏幕首条文字，≈ 新页标题）、
+  `candidates`（多命中时最多 6 个候选，含 text/x/y/w/h/nodeIndex/clickable，供改用坐标精确点）。
+- 渲染成「点击成功。/ 方式 / 命中：插件 (36,1468 612x102) / 节点索引：38 / 页面变化：是 / 当前首文本：插件」。
+- 失败且有多候选时，把候选列表也渲染出来（AI 不用再自己读屏找坐标）。
+
+**证据（改完重跑要看到）**：`android_tap(text=插件)` 的正文含 `命中：`、`节点索引：`、`页面变化：是`。
+
+---
+
+## 六、改后自由复测（2026-10-18 08:51，同一 prompt 再让 AI 自由用一遍）
+
+- 报告：`ai-accessibility/review-after.txt`（改前原报告已备份为 `review-before.txt`）。
+- **新字段被 AI 直接引用为证据**：
+  - `android_a11y_status | running=true；服务组件 com.deepseek.harness/.AccessibilityService；当时前台 com.android.systemui；可读控件 88；读屏 / 手势注入 / 截图 均可用；Android API 35`
+  - `android_tap(插件) | 方式 node-text；命中 插件 (36,1498 516x38)；nodeIndex=39；clickableAncestor=是；pageChanged=是；newTitle=‹ 控制台`
+  - `android_scroll(down) | 内容变化 是（节点数 38→39）`；`android_swipe | 内容变化 否（未检测到位移，已到底部——不是注入失败）`
+  - 反向 swipe 立即验证「内容变化 是（38→39）」，说明 AI 不再需要为「到底还是失败」补 4 次调用。
+- 这次自由复测又提了 3 条**新**建议，本轮**不采纳**（留档给下一轮，理由：用户要求「先把工具弄完，最后全量」，
+  本轮三条已闭环且已过全量；这三条不改变已验收判据）：
+  1. 启动遮罩的「幽灵节点」常驻无障碍树（节点在、像素不在），建议给 `android_screen` 加 `visible`/`includeInvisible`——
+     属于读屏数据模型改动，影响面大，未在本轮做；
+  2. `android_hold`/`android_touch` 成功只回「操作成功。」，建议加 `resolvedX/Y`、`requestedMs`、`heldMs`、`hitNode`、
+     `released`（本轮只做了 tap；hold/touch 的输出结构按要求保持不变）；
+  3. scroll/swipe 建议加 `scrolledPx` 与更清晰的首节点语义——需要跨帧坐标差，成本高于收益。
+
+## 不采纳项
+
+无。三条都是插件层可做的真实改进，不涉及 App 壳层、不需要新权限、不改变任何既有工具名/参数。
+
+## 兼容性说明
+
+- **只改 `release-src/plugins/dsh-tool-accessibility/lib/index.js`**，App Java 一行未动。
+- 所有新增返回字段都已写进各自 `output.schema`（`additionalProperties:false`，漏声明会整次判非法）。
+- 新增字段全部可选；旧字段（`ok/found/method/package/nodeCount/...`）语义不变。
+- 只在 `android_a11y_status` / `android_tap` / `android_scroll` / `android_swipe` 四个工具上加对比读屏；
+  `android_touch` / `android_gesture` / `android_hold` / `android_touch_status` 的输出结构完全未动。
+- 每个动作多 1~2 次 `/dump`（真机约 100~300ms/次），换来「省掉 AI 自己补读屏的 1~2 次调用」。

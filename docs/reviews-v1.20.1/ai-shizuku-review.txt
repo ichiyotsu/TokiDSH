@@ -1,0 +1,67 @@
+# AI 对 dsh-tool-shizuku 的改进建议 —— 采纳/不采纳记录（v1.20.1）
+
+> 来源：2026-10-18 00:30 设备上的 AI 真实使用 shizuku 特权通道。
+> 真实副作用证据（原始报告）：
+> - `shizuku_status` → `shizuku(App 进程 / Shizuku API)` 可用
+> - `shizuku_shell id` → `uid=2000(shell) gid=2000(shell) ... context=u:r:shell:s0`
+> - `shizuku_shell getprop ro.product.model` → `PLT120`（与 adb 一致）
+> - `android_notify` → 通知已发送；随后 `dumpsys notification --noredact | grep` **确实命中
+>   android.title=String (DSH 功能自检) 与 android.text=String (...)**（标题/正文两行都拿到）
+> - `android_clipboard write/read` → 写入并读回 `DSH-CLIP-自检-2026`
+> - `sound_effects_enabled` 0 → 1 → 0（翻转后已还原）
+> 原始报告：`tmp-diag/v1192/ai-shizuku/review.txt`；驱动日志：`ai-shizuku/run.log`
+
+AI 提了 3 条：**2 条全采纳，1 条部分采纳**（取消通知那半条需要 App 壳层支持，本轮不改壳层）。
+
+---
+
+## 建议 1｜android_setting_app 没有 action=get，读原值要绕道
+
+**AI 原话（摘要）**：工具签名只有 key/value，无法 get；本轮只能退回 `android_setting(namespace=system)`
+读原值，多打了 3 次调用；put 也只回一句"系统设置已修改 ✅"，没有 oldValue/newValue。
+
+**采纳**。改法（插件层，不改 App Java）：
+- 增加可选参数 `action`（`get` / `put`，缺省 `put`）；
+- `get`：走特权 shell `settings get system <key>`（shell uid 可读），返回
+  `{ok, namespace:"system", key, value}`；
+- `put`：先用 shell 读 `oldValue` → 再走 App `/setting` 写入（保留 App 的 WRITE_SETTINGS 通道）
+  → 再用 shell 读 `newValue`；返回 `{ok, namespace, key, oldValue, newValue}`。
+- 读不到值（空/`null`）时 `ok:false` 且给明确 error。
+
+**证据（改完重跑要看到）**：一次 `android_setting_app get` 直接回 `{value:"0"}`；
+一次 `put value=1` 回 `{oldValue:"0", newValue:"1"}`。
+
+---
+
+## 建议 2｜android_setting get 的返回值通道不一致（stdout / stderr 漂移）
+
+**AI 原话（摘要）**：同一个 `settings get`，第一次值 "0" 出现在 stderr、stdout 为空；
+第二三次又在 stdout。会把成功读取误判成失败。
+
+**采纳，但落点在 android 插件**（`android_setting` 属于 `dsh-tool-android`，与 shizuku 的同一条工具链）。
+改法：`get` 的取值统一按 `stdout || stderr` 取（特权 shell 偶发把值写 stderr），
+stderr 只在确实为空且 exit_code≠0 时才当错误；结构化返回 `{namespace, key, value, range}` 不变。
+**说明**：这处代码改动会随 shizuku 批一起重编（android 批的回归已经在跑，不改它的产物），
+并在 android 的 review 文档里也记一笔。
+
+---
+
+## 建议 3｜android_notify 没有 id/tag，无法精确取消、只能 grep
+
+**AI 原话（摘要）**：只回 "通知已发送 ✅"，不能精确取消；grep 标题只能命中 1 行
+（标题/正文分处两个字段），得多查一次正文才拿到佐证。
+
+**部分采纳**：
+- **采纳**：发送后用特权 shell `dumpsys notification --noredact` 校验"标题和正文是否真的在通知栏"，
+  返回 `{posted, visible, evidence}`（evidence = 命中的 android.title/android.text 行，截断）；
+  于是"发送成功但被系统静默拦截"能当场判出来，不用模型自己拼 dumpsys。
+- **不采纳（取消/精确 id）**：通知由 **App 壳层**（MainActivity 的 NotificationManager）发出，
+  App 的 `/notify` 没暴露 id/tag，也没有取消接口；要做"按 key/id 取消"必须改 App Java 并新增路由。
+  用户本轮的纪律是**只改自研插件**，所以这里不越界；已在文档里记为"下一轮若允许改壳层再做"。
+
+**证据**：改完 `android_notify` 返回 `visible:true` + 2 行 evidence（title 与 text 各一）。
+
+## 未采纳（明确记录）
+
+- `android_notify_cancel(action=cancel, key|id)`：需要 App 壳层新增通知 id 暴露与取消路由；
+  本轮只改插件，不做。

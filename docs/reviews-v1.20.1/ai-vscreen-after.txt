@@ -1,0 +1,54 @@
+====================================================================
+DSH 手机版本轮全量回归 · vscreen（虚拟屏）插件实测证据
+设备执行时间：2026-10-18 08:54 ~ 08:56 (Asia/Shanghai)
+测试目标 app：net.csdn.csdnplus（CSDN）
+渲染目标：create 参数 width=720 height=1280 dpi=320 orientation=0
+====================================================================
+
+【第一部分】工具调用逐条记录（按真实调用顺序）
+格式：工具名 | ok/err | 摘要
+
+1. android_vscreen_status | ok | 初始状态：虚拟屏未创建（displayId=-1）
+2. android_vscreen_create | ok | 参数 width=720 height=1280 dpi=320 orientation=0 → displayId=14，720x1280 @320dpi，朝向 portrait
+3. android_vscreen_status | ok | running=true，displayId=14（与创建一致），画面：暂无首帧（app 还没画到这块屏）
+4. android_vscreen_launch | ok | app=net.csdn.csdnplus → package=net.csdn.csdnplus，component=.activity.SplashActivity，displayId=14，返回「画面变化：是（虚拟屏画面已刷新）」
+5. android_vscreen_see | ok | waitMs=3000 → path=/storage/emulated/0/DeepSeekHarness/vscreen/vscreen-1792284889979.png，6367 bytes，720x1280；文件真实存在（-rw-rw---- u0_a241:media_rw），前 8 字节 = 89 50 4E 47 0D 0A 1A 0A（PNG 魔数正确），file 识别为 "PNG image data, 720 x 1280, 8-bit/color RGBA"；画面内容为纯白空白
+6. android_vscreen_tap | ok | x=360,y=640（画面中央）→ 返回仅「操作成功。」，无任何变化/命中字段；logcat 同期记录 "Dropping event because there is no touchable window at (360.0, 640.0) on display 14."
+7. android_vscreen_see | ok | waitMs=2000 → path=/storage/emulated/0/DeepSeekHarness/vscreen/vscreen-1792284898281.png，6367 bytes；与第 5 步截图 md5 完全相同（53e4e6f0572b6cadadf2ab1d946446fc），cmp 判定 IDENTICAL，SHA-256 亦一致 → 点完画面无任何变化（无翻页、无弹层）
+8. android_vscreen_status | ok | running=true，displayId=14，画面：已有首帧（仍为纯白帧，无 app 内容）
+9. android_vscreen_key | err | key=KEYCODE_BACK → 原文返回「按键失败：虚拟屏服务超时」；logcat 显示 KeyEvent BACK(displayId=14) 注入后最终命中 displayId=0 的 com.deepseek.harness/.MainActivity（result='OK'），即事件实际落到了主屏
+10. android_vscreen_status | ok | running=true，displayId=14，画面：已有首帧（服务仍健在，说明超时不是屏没了）
+11. android_vscreen_key | err | key=back（别名重试）→ 同样返回「按键失败：虚拟屏服务超时」，可复现
+12. android_vscreen_swipe | ok | (360,1000)→(360,400)，durationMs=300（安全区域）→ 返回仅「操作成功。」；logcat 同期记录 "Dropping event because there is no touchable window at (360.0, 1000.0) on display 14."
+13. android_vscreen_close | ok | 「操作成功。」，虚拟屏关闭
+14. android_vscreen_status | ok | running=false，虚拟屏未创建（displayId=-1）→ 关屏收尾确认，未留虚拟屏
+
+【第二部分】3 条改进建议
+
+## 建议 1
+问题：android_vscreen_launch 的「画面变化：是」会把「首帧到达但为纯白」误报成"画面已刷新"，且完全不检测目标 app 是否秒退。实测：launch 返回「画面变化：是（虚拟屏画面已刷新）」，但紧接着的截图是 6367 字节纯白（720x1280 的 PNG 只有 6KB，本身就说明是单色帧）；logcat 显示 net.csdn.csdnplus/.activity.SplashActivity t1942 在 08:54:48.363 就被 removeAppToken / onTaskVanished（state=DESTROYED），displayId=14 上一个 activity 都没留下，dumpsys 里该 display 只剩一个空 Task。也就是说工具告诉我"画面变了"，实际是"白屏闪过然后就没了"。
+建议改法：launch 返回值增加 4 个字段：`firstFrame`（blank/content/absent）、`foregroundActivity`、`appExited`、`exitedAfterMs`；「画面变化」从布尔改成三态文案：「无变化」/「仅首帧到达（空白帧）」/「已绘制非空白帧」。判定方式：截帧统计唯一色数，==1 即判空白；launch 后用 2~3s 轮询该 display 的 ResumedActivity 是否仍属于目标包，已退出就回 `appExited=true` 并附最后 Activity 名。文案示例：「首帧已到达但为纯白空白帧；SplashActivity 已于 412ms 后退出，目标 app 未在 displayId=14 呈现界面」。
+影响：本任务里为了确认"launch 之后到底渲染没有"，我额外花了 1 次 see + 1 次文件字节比对 + 1 次 dumpsys activity + 1 次 logcat 才看清真相，共 4 次调用；有这 4 个字段可省掉 3 次，并避免把白屏当成"app 已就绪"、随后对死屏做无效交互的误判。
+
+## 建议 2
+问题：android_vscreen_tap / android_vscreen_swipe 在事件被 InputDispatcher 丢弃时依然返回「操作成功。」，且不返回 changed/命中窗口。实测两条原文：`Dropping event because there is no touchable window at (360.0, 640.0) on display 14.`（tap）与 `Dropping event because there is no touchable window at (360.0, 1000.0) on display 14.`（swipe）。返回体里没有任何字段能区分"点中了"和"被丢了"，我只能再补一次 vscreen_see + 跑 md5sum/cmp 才发现前后两帧字节完全一致（6367 bytes / 53e4e6f0572b6cadadf2ab1d946446fc）。
+建议改法：tap/swipe 返回体增加 `dropped`（bool）、`reason`（no_touchable_window / display_mismatch / outside_bounds）、`hitWindow`（该坐标命中的窗口名）、`beforeFrameHash`/`afterFrameHash`、`changed`（bool）。文案直接写：「事件已注入但被 InputDispatcher 丢弃：display 14 在 (360,640) 无 touchable window，画面未变化」。changed 用注入前后帧哈希比对即可，不必额外截全图。
+影响：本任务 2 次交互各多耗 1 次 see + 1 次 shell 哈希比对，共 4 次调用可全省；更关键是避免把"丢弃"读成"点击成功"，从而写出"点击后进入下一页"这种错误结论。
+
+## 建议 3
+问题：android_vscreen_key 两次（KEYCODE_BACK 与别名 back）都返回「按键失败：虚拟屏服务超时」，但事件其实已经发出去，并且落到了 displayId=0 的主屏——logcat 原文 `displayId=0, name='d64b60e com.deepseek.harness/com.deepseek.harness.MainActivity' result='OK'`。等于"在虚拟屏按返回键"实际动的是用户主屏，且工具把"已发出"报成"失败"，好坏两头都错。另外同一时刻 android_vscreen_status 只回「虚拟屏运行中，displayId=14；画面：已有首帧」，查不到前台是哪个包、有没有 activity，"已有首帧"极易被读成"app 正常在跑"（实际是空白帧 + 无 activity）。
+建议改法：（1）key 注入禁止 fallback 到其它 display：注入前先校验 display 14 存在 focused window，没有就直接返回 `ok:false, injected:false, reason:no_focused_window_on_display`，绝不允许落到 display 0；把 syncMode=WAIT_FOR_FINISHED 的 30s 等待改成短超时（约 1.5s），并把 `injected/ok/dropped` 如实回传，消除「超时=没生效」的模糊态。（2）status 增加 `foregroundPackage`、`resumedActivity`、`activityCount`、`frameBlank` 四个字段。
+影响：本任务正是「key 失败 → 查 status → 再 key 别名重试 → 再查 status」白烧了 3 次调用（第 9~11 步）；补上前述字段后 1 次 status 即可判断"屏空着、没前台包"，同时消除虚拟屏按键误伤主屏这一安全层面的误判。
+
+====================================================================
+【附】系统侧取证（dumpsys / logcat，供复核）
+====================================================================
+1) 虚拟屏真实存在：DisplayDeviceInfo{"DSHVscreen-5"; uniqueId="virtual:com.android.shell,2000,DSHVscreen-5,11"; 720 x 1280; density 320; type VIRTUAL; owner com.android.shell (uid 2000)}，mDisplayId=14，layerStack 14，FLAG_SECURE / FLAG_PRESENTATION / FLAG_OWN_DISPLAY_GROUP。
+2) launch 未真正呈现：Display #14 下无任何 Hist # 记录，仅 mLastFocusedRootTask=Task{a089d47 #1942 type=standard A=10354:net.csdn.csdnplus}；logcat：08:54:48.363 finishTransition ar ActivityRecord{6d1e8c8 ... SplashActivity t1942 ... state=DESTROYED}、removeAppToken、onTaskVanished；08:54:48.366 OplusScreenSecurityMask onStackRemoved task=1942 displayId=14。
+3) CSDN 进程未死：pid 22029 存活（08:54:57 被 ActivityManager freezing 到后台），未做任何 force-stop / 清数据 / 安装卸载。
+4) tap 丢弃原文：10-18 08:54:56.775 InputDispatcher: Dropping event because there is no touchable window at (360.0, 640.0) on display 14.
+5) swipe 丢弃原文：10-18 08:55:53.435 InputDispatcher: Dropping event because there is no touchable window at (360.0, 1000.0) on display 14.
+6) BACK 误投原文：10-18 08:55:23.919 injectInputEvent KeyEvent{keycode=4(BACK), displayId=14}，随后 08:55:28.977 Input looking for focused window ... displayId=0, name='d64b60e com.deepseek.harness/com.deepseek.harness.MainActivity' result='OK'。
+7) 关屏收尾：android_vscreen_close 后 dumpsys display 中 "DSHVscreen" 匹配数 = 0，现存显示设备仅剩 DisplayDeviceInfo{"内置屏幕"}；android_vscreen_status 返回 displayId=-1。
+8) 主屏未受影响：测试结束后会话正常，未改任何系统设置（铃音/音量/闹钟/勿扰均未触碰）。
+====================================================================

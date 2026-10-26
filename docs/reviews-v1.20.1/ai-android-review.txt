@@ -1,0 +1,85 @@
+# AI 对 dsh-tool-android 的改进建议 —— 采纳/不采纳记录（v1.20.1）
+
+> 来源：2026-10-18 00:24 设备上的 AI 真实调用 android 插件 7 个工具 + 3 项附加只读校验。
+> 真实副作用证据（报告的原始记录）：
+> - `android_usage` days=1 → 34 行应用时长（DeepSeek Harness 428 分钟 / 抖音 305 分钟 / UU远程 203 分钟）
+> - `android_app current` → `mFocusedApp=ActivityRecord{... com.deepseek.harness/.MainActivity}`
+> - `android_screenshot` → `/sdcard/DeepSeekHarness/screenshots/shot-2026-10-17T16-24-33-153Z.png`，
+>   153,305 bytes，前 8 字节 = `89 50 4E 47 0D 0A 1A 0A`，`file` 认成 `PNG image data, 720 x 1570, 8-bit/color RGBA`
+> - `android_package list third_party_only=true` → 104 行
+> - `android_setting get system screen_brightness` → 裸值 `8`
+> - `android_overlay show/status/hide` → **三者返回同一句文案**（真实缺陷）
+> - `android_input tap(50,1540)` → exit_code 0 + 空 stdout（无法判断注入是否生效）
+> 原始报告：`tmp-diag/v1192/ai-android/review.txt`；驱动日志：`ai-android/run.log`
+
+AI 提了 3 条，**全部采纳**（都只改自研插件 `release-src/plugins/dsh-tool-android`，内核自带工具不动）。
+
+---
+
+## 建议 1｜android_overlay 的 show / hide / status 无法区分状态
+
+**AI 原话（摘要）**：三个动作都回「悬浮窗运行中: true，引擎在线: true，悬浮窗权限: 已授予」；
+hide 之后无法判断是否真的隐藏，只能再补 status + 截图人工确认，而 status 同样回「运行中: true」，
+更容易误判成"没隐藏成功"。
+
+**采纳**。改法（插件层，不改 App Java）：
+- 新增 `overlayVisible()`：通过特权通道跑
+  `dumpsys window windows | grep -A20 'appop=SYSTEM_ALERT_WINDOW'`，解析 `mViewVisibility`；
+  只要有一扇 harness 的 overlay 窗口 `mViewVisibility=0x0` 就算可见。
+- `show` / `hide` / `status` 返回统一结构化字段：
+  `visible`（真实可见性）、`changed`（与动作前相比是否变化）、`engineOnline`、`permission`、`msg`；
+- `hide` 在原本就不可见时回 `changed:false`；**不再复用同一句文案**。
+- 注意：改的是**插件返回值**；App 侧 `/overlay` 还是只回 running/engineUp/granted ——
+  "真实可见性"由插件用特权 shell 查窗口状态得到。
+
+**证据（改完重跑后要看到）**：`show → visible:true, changed:true`；`hide → visible:false, changed:true`；
+`status → visible:false, changed:false`。
+
+---
+
+## 建议 2｜android_input 成功时只有 exit_code 0 + 空 stdout，无法区分"注入生效"和"坐标无效"
+
+**AI 原话（摘要）**：tap(50,1540) 后前台与界面都无变化，「点击成功但该位置无效」和「注入没生效」
+返回完全一致，等于这步验证不出特权输入通不通。建议回 `injected/x/y/screenW/screenH/targetPackage`，
+越界要明确失败并给非 0 exit_code。
+
+**采纳**。改法：
+- 输入参数先做**客户端校验**：tap/swipe 的坐标必须落在 `wm size` 的屏幕范围内，
+  否则直接 `ok:false, error:"坐标越界..."`、`exit_code:-1`（不再静默成功）；
+- 返回结构化字段：`action` / `injected`（exit_code==0 且命令真的跑完）/ `x` / `y` /
+  `screenW` / `screenH` / `targetPackage`（用 `dumpsys window | grep mCurrentFocus` 取）；
+- `text` / `keyevent` 也回 `action` 与 `injected`，不再只给空 stdout。
+
+**证据**：改完让 AI 重跑一次 tap，返回里能直接看到 `injected:true, x, y, screenW:720, screenH:1570`。
+
+---
+
+## 建议 3｜列表/标量类返回缺结构化元信息（数量、命名空间、量纲）
+
+**AI 原话（摘要）**：`android_package list` 回 104 行纯 `package:` 文本没有总数；`android_usage`
+回 34 行文本没有总应用数；`android_setting get` 只回裸值 "8"，不带你查的 namespace/key，
+也不说取值范围，连着查多项对不上号、还可能把 8 误读成 8%。
+
+**采纳**。改法：
+- `android_package list`：保留 stdout，另回 `count`、`thirdPartyOnly`、`packages`（最多 200 条包名数组）；
+- `android_usage`：回 `count`（应用数）+ `days`（已有 apps 数组），render 首行加「共 N 个应用」；
+- `android_setting get`：回 `namespace` / `key` / `value`，并对已知键给 `range` 提示
+  （`screen_brightness` → `0-255 原始值`；`screen_off_timeout` → `毫秒`；`volume_*` → 设备音量档位）；
+  读不到时 `ok:false, error:"not found"`。
+
+**证据**：改完重跑 `android_package`/`android_setting` 的返回里能看到 `count` / `namespace` / `range`。
+
+## 额外发现（改完真机复测时暴露的 App 层缺口，本轮不越界修）
+
+- `android_overlay show` 在悬浮球已被「拖到底隐藏 / 双击收起」之后**不会真的恢复**：
+  App 的 `/overlay` show 只做 `startOverlayService()`，服务已在跑时是 no-op；
+  `OverlayService.userHidden` 仍是 true（patch127 的「恢复显示悬浮球」按钮走的是 `showBallNow()`，
+  那是 UI 按钮、没有 HTTP 路由）。插件的 `visible` 现在会**如实回 false**，不再假装成功。
+  **修法需要 App 壳层**：给 `/overlay` 增加 `action=show` 时调用 `OverlayService.showBallNow()`
+  （或在 `/overlay` 里清 `userHidden`）。本轮纪律是只改自研插件，所以记录在此、留给下一轮壳层改动。
+- 复测时还踩到两个 schema 坑（已修）：`action` 未声明、`visible=null` 违反 boolean ——
+  这说明"结构化返回"必须在 `additionalProperties:false` 下逐字段声明，否则整次调用被判非法。
+
+## 未采纳
+
+无（3 条全部采纳）。额外发现的 App 层缺口不属本轮插件改动范围，已单列说明。

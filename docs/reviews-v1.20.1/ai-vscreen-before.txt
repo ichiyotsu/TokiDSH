@@ -1,0 +1,79 @@
+DSH 手机版 · vscreen 虚拟屏插件全量回归证据
+执行时间：2026-10-18 07:11 ~ 07:14（Asia/Shanghai）
+设备：ColorOS（Android，主屏 focus=com.deepseek.harness/.MainActivity）
+说明：以下每行均为真实工具调用的原文摘要，未做美化；失败的保留失败原文。
+
+==================== 第一部分：逐次调用记录 ====================
+[序号] 工具名 | 结果 | 摘要
+
+[01] android_vscreen_status | ok | "虚拟屏未创建（displayId=-1）"——初始状态确认无虚拟屏
+[02] android_vscreen_create(width=720,height=1280,dpi=320,orientation=0) | err | 返回原文：Error: invalid arguments: "orientation" must be a string（orientation 只接受字符串枚举 portrait/landscape，任务书里的 0 被拒）
+[03] android_vscreen_create(width=720,height=1280,dpi=320) | ok | 返回仅 "操作成功。"；无 displayId、无 running、无归一化尺寸回显（只能靠下一次 status 补）
+[04] android_vscreen_status | ok | "虚拟屏运行中，displayId=11，720x1280"——running=true，displayId=11，尺寸被归一化为 720x1280（dpi=320）
+[05] android_vscreen_launch(app=net.csdn.csdnplus) | ok | 返回仅 "操作成功。"；无 package、无 displayId、无 topActivity（假成功隐患，见建议1）
+[06] android_vscreen_see | err | 返回原文：虚拟屏暂无画面（App 尚未渲染或屏幕刚创建）；入参 {"ok":false,"error":"虚拟屏暂无画面（App 尚未渲染或屏幕刚创建）"}
+[07] bash sleep 4 → android_vscreen_see | err | 连续第 2 次同样报 "虚拟屏暂无画面…"（等待 4 秒无效）
+[08] android_vscreen_status | ok | 仍为 "虚拟屏运行中，displayId=11，720x1280"（屏没挂，是画面没有）
+[09] bash sleep 6 → android_vscreen_see | err | 连续第 3 次同样报错；累计已等约 18 秒仍无画面
+[10] android_vscreen_launch(net.csdn.csdnplus) 重试 | ok | 仍只返回 "操作成功。"
+[11] android_vscreen_see | err | 连续第 4 次同样报错，画面始终为空
+[12] android_package list(filter=csdn) | ok | "package:net.csdn.csdnplus"——排除包名不存在，确认 app 已安装
+[13] android_app current | ok | stderr 原文：mFocusedApp=ActivityRecord{e8903e1 u0 com.deepseek.harness/.MainActivity t1914}（焦点还在主屏，副屏没抢到前台）
+[14] android_vscreen_launch(app=com.android.settings) | ok | "操作成功。"；用于区分"截图坏了"还是"CSDN 不肯上副屏"（仅打开设置首页，未改任何设置项）
+[15] android_vscreen_see | ok | path=/storage/emulated/0/DeepSeekHarness/vscreen/vscreen-1792278744644.png；720x1280，97914 bytes，scaleX=1 scaleY=1；画面=设置首页 → 证明截图链路本身正常
+[16] bash 校验文件 | ok | 文件真实存在（-rw-rw---- 97914 2026-10-18 07:12）；前 8 字节十六进制 = 89 50 4e 47 0d 0a 1a 0a（PNG 魔数正确）
+[17] android_vscreen_launch(app=net.csdn.csdnplus) 第 3 次 | ok | 又只返回 "操作成功。"
+[18] bash sleep 6 → android_vscreen_see | ok | path=.../vscreen-1792278757713.png；720x1280，97914 bytes，sha256=6a27c22e…；画面仍是设置首页，与 [15] 字节数、sha256 完全相同 → CSDN 根本没上前台
+[19] android_vscreen_tap(x=360,y=640) | ok | "操作成功。"（虚拟屏中央点一次）
+[20] android_vscreen_see | ok | path=.../vscreen-1792278762993.png；720x1280，115081 bytes，sha256=fa1af660…；画面已变：进入「账号」页并弹出「手机号还在正常使用吗？」弹窗 → tap 生效
+[21] android_vscreen_key(key=KEYCODE_BACK) | err | 返回原文：执行失败：未知按键: KEYCODE_BACK
+[22] android_vscreen_key(key=back) | ok | "操作成功。"
+[23] android_vscreen_see | ok | path=.../vscreen-1792278769590.png；115081 bytes，sha256=fa1af660…（与 [20] 同图）；画面无变化——因该页面为模态弹窗，back 被弹窗吞掉，非按键注入故障
+[24] android_vscreen_swipe(360,1000)→(360,420),400ms | ok | "操作成功。"
+[25] android_vscreen_see | ok | path=.../vscreen-1792278778466.png；115081 bytes，sha256=fa1af660…（仍同图）；列表未滚动，同样是被模态弹窗吞触摸
+[26] android_vscreen_tap(x=250,y=1120)（弹窗「仍在使用」） | ok | "操作成功。"
+[27] android_vscreen_see | ok | path=.../vscreen-1792278783716.png；108082 bytes，sha256=20e549ff…；弹窗已关闭，露出「云服务/查找/家人共享/电子保修卡」→ 画面确实变化
+[28] android_vscreen_swipe(360,1000)→(360,420),400ms 重做 | ok | "操作成功。"
+[29] android_vscreen_see | ok | path=.../vscreen-1792278789433.png；100130 bytes，sha256=42333089…；列表已滚到底部（电子保修卡/自动填充/付款与订阅/会员中心/游戏记录/当前登录设备/联系客服）→ swipe 生效
+[30] android_vscreen_key(key=back) | ok | "操作成功。"
+[31] android_vscreen_see | ok | path=.../vscreen-1792278794441.png；99757 bytes，sha256=7ae14c81…；已从「账号」页退回设置首页 → back 生效（[23] 的无变化确系弹窗吞栈）
+[32] android_vscreen_close | ok | "操作成功。"
+[33] android_vscreen_status | ok | "虚拟屏未创建（displayId=-1）"→ running=false，虚拟屏已释放
+[34] shizuku_shell dumpsys display | ok | 输出中已无 displayId=11（计数 0）→ 辅助确认副屏确实销毁，收尾干净
+
+—— 辅助诊断（只读 dumpsys / logcat，用于定位 CSDN 异常，不参与动作注入）——
+[D1] dumpsys activity activities | CSDN 确有任务落在 displayId=11："mLastFocusedRootTask=Task{f874245 #1915 type=standard A=10354:net.csdn.csdnplus}"，但该 display 下没有任何 ActivityRecord
+[D2] dumpsys window displays（display 11） | "Display: mDisplayId=11 (organized) init=720x1280 320dpi cur=720x1280 app=720x1280"、"mCurrentFocus=null"、"mFocusedApp=null" → 屏在、无窗口
+[D3] logcat | "wm_task_removed: [1916,1916,11,removeChild, last child = ActivityRecord{b2078e9 u0 net.csdn.csdnplus/.activity.SplashActivity t-1 f}] … displayId = 11" → SplashActivity 在副屏刚起就被销毁（f=finishing），app 自身不兼容副屏显示
+[D4] dumpsys window displays（点击后） | display 11 mCurrentFocus=Window{4b61097 u0 com.oplus.account/...AcUserCenterActivity} → 与截图[20]的「账号」页一致，证明 tap 精确落在副屏坐标
+
+—— 截图文件清单（全部 720x1280，PNG 魔数 89504e470d0a1a0a 均已验证）——
+vscreen-1792278744644.png  97914B  sha 6a27c22e… 设置首页（首张）
+vscreen-1792278757713.png  97914B  sha 6a27c22e… 同上（launch CSDN 后仍无变化）
+vscreen-1792278762993.png 115081B  sha fa1af660… 账号页+模态弹窗（tap 后）
+vscreen-1792278769590.png 115081B  sha fa1af660… 同上（back 被弹窗吞）
+vscreen-1792278778466.png 115081B  sha fa1af660… 同上（swipe 被弹窗吞）
+vscreen-1792278783716.png 108082B  sha 20e549ff… 弹窗关闭（点「仍在使用」后）
+vscreen-1792278789433.png 100130B  sha 42333089… 列表滚到底（swipe 生效）
+vscreen-1792278794441.png  99757B  sha 7ae14c81… 退回设置首页（back 生效）
+
+—— 结论 ——
+成功的：status / create / close / tap / swipe / key(back) / see 全链路可用，PNG 真实落盘，坐标精确，收尾 running=false。
+失败的：CSDN 无法在虚拟屏上驻留（app 侧不兼容，SplashActivity 即刻 finish），而 launch 对此返回"操作成功。"、see 只回一句笼统的"暂无画面"。
+
+==================== 第二部分：改进建议 ====================
+
+## 建议 1
+问题：android_vscreen_launch 是"假成功"——不看目标 Activity 是否真的到了虚拟屏就返回。实测对 net.csdn.csdnplus 连调 3 次，每次都只回 "操作成功。"（无 package、无 displayId、无 topActivity）；但 logcat 显示 "wm_task_removed: [1916,1916,11,removeChild, last child = ActivityRecord{b2078e9 …SplashActivity t-1 f}]"，SplashActivity 起来即被销毁，display 11 的 mCurrentFocus 一直是 null；随后 vscreen_see 连续 4 次（跨度约 18 秒）全是 {"ok":false,"error":"虚拟屏暂无画面…"}，换成 com.android.settings 才出图。更能说明问题的是：先拍完设置首页（97914B / sha 6a27c22e…）再 launch CSDN，第二张截图依旧是 97914B / sha 6a27c22e…，字节级完全一致——即"上一步成功"和"屏幕没变"同时成立。
+建议改法：launch 内部轮询该 display 的 top Activity（最多 waitMs，默认 2000ms），返回结构化结果 {ok, package, displayId, launchedActivity, visible:true|false, elapsedMs}；若 2~3 秒内 focusedApp 仍不是目标包名，返回 {ok:false, error:"activity_unstable", reason:"launch 后立即销毁", lastActivity:"net.csdn.csdnplus/.activity.SplashActivity", hint:"目标 app 可能不支持副屏，可换 app 或改用主屏"}。
+影响：本次实测为这一次假成功额外花了 3 次 launch + 4 次 see + 3 段 sleep（约 30 秒、7 次调用）才判定"不是截图坏了而是 app 不兼容"；改后 1 次调用即可定性，且能避免自动化脚本把"目标 app 没起来"误判成"截图能力故障"而误报回归失败。
+
+## 建议 2
+问题：android_vscreen_see 失败只有一句万金油文案，且没有等待/重试参数，调用方无法区分"该等"还是"该放弃"。四次返回一模一样：{"ok":false,"error":"虚拟屏暂无画面（App 尚未渲染或屏幕刚创建）"}。可这四种场景语义完全不同：①刚 create 屏还没首帧；②launch 后 app 尚在冷启动；③如本例 app 已退出、display 11 上 mCurrentFocus=null 根本没有任何窗口；④抓帧器本身失败。现状下只能靠人工 sleep 4s / 6s / 8s 反复试探，且每一轮都要多花一次 see。
+建议改法：拆成可判别的错误码：no_display（未 create）、no_window（当前 display 无任何窗口，等同 app 没起来）、not_rendered（有窗口但暂无首帧，可重试）、capture_failed（抓帧器异常）；并新增 waitMs 参数（默认 0，上限 5000，内部 200ms 轮询出帧即返回）与 includeFrameInfo；失败时一并回传 displayId、focusedApp、windowCount，便于直接定位。
+影响：把"睡几秒再猜"的 3 次盲试压成 1 次带 waitMs 的调用（省 2~3 次调用、每轮省 4~8 秒），并避免把"app 无窗口"这种硬失败当成"再等等就好"，减少回归报告里的误判。
+
+## 建议 3
+问题：参数取值/命名不统一，同族工具之间风格割裂，容易踩空。①android_vscreen_create 传 orientation=0（任务书给的就是 0）直接报错：Error: invalid arguments: "orientation" must be a string；②android_vscreen_key 传 key=KEYCODE_BACK 报 执行失败：未知按键: KEYCODE_BACK，只认 back/home/enter/menu/volume_up/volume_down；③而 android_vscreen_tap/swipe 用的是 x/y 绝对像素、android_tap 用 fx/fy 分数坐标，key 却又只认小写短名，三套写法混用；④create 成功只回 "操作成功。"，不回显 displayId/最终尺寸（实际是 720x1280@320dpi），必须再多调一次 status 才知道 displayId=11。
+建议改法：orientation 同时接受 0/1、"0"/"1"、portrait/landscape（0 或 portrait=竖屏），非法值也给出"可接受值清单"而非一句 must be a string；vscreen_key 增加别名映射表 KEYCODE_BACK/KEYCODE_HOME/BACK/4→back 等，未知值返回 {ok:false, error:"unknown_key", accepted:[...]}；create 返回补全 {ok:true, displayId:11, width:720, height:1280, dpi:320, orientation:"portrait"} 并回显归一化动作（如 "requested 720x1280 → normalized 720x1280"）。
+影响：本次两个参数各白跑 1 次调用（共 2 次无效调用 + 2 次重试），create 后还多调 1 次 status 才拿到 displayId；统一后每轮至少省 3 次调用，且不会因枚举大小写/类型差异让整条自动化脚本在第一步就崩。

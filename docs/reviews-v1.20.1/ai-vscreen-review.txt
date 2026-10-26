@@ -1,0 +1,109 @@
+# AI 对 dsh-tool-vscreen 的改进建议 —— 采纳/不采纳记录（v1.20.1）
+
+> 来源：2026-10-18 07:11-07:14 设备上的 AI 真实跑了一遍虚拟屏
+> （status → create → launch → see → tap → swipe → key → close → status → dumpsys 复核）。
+> 原始报告 `tmp-diag/v1192/ai-vscreen/review.txt`。
+> 真实副作用证据（AI 记录）：create 后 `displayId=11, 720x1280`；设置页截图 `97914 B`、PNG 魔数
+> `89504e470d0a1a0a`；tap 后画面变「账号」页+弹窗（115081 B / sha `fa1af660…`）；swipe 滚到底（100130 B）；
+> back 退回设置首页（99757 B）；close 后 `running=false`、`dumpsys display` 已无 displayId=11（无残留）。
+
+AI 提了 3 条：**2 条全采纳，1 条部分采纳**（其中「launch 直接判 ok:false」这半条不改，理由见下）。
+
+---
+
+## 建议 1｜android_vscreen_launch 是「假成功」
+
+**AI 原话（摘要）**：对 `net.csdn.csdnplus` 连调 3 次都只回「操作成功。」，无 package/displayId/topActivity；
+但 logcat 里 `SplashActivity` 起来即 finish、`dumpsys window displays` 的 display 11 `mCurrentFocus=null`；
+紧接着 4 次 `see`（约 18 秒）全是「虚拟屏暂无画面」。换 `com.android.settings` 才出图。最硬的证据是
+**launch CSDN 前后两张截图字节级完全相同**（97914B / sha `6a27c22e…`）——「上一步成功」和「屏幕没变」同时成立。
+
+**部分采纳**：
+- ✅ launch 现在把服务端真实返回的 `package` / `component`（= launchedActivity）/ `displayId` 透出来，
+  不再丢掉（之前 execute 只取 `ok`）。
+- ✅ 新增启动前后 **截图 sha256 对比**：`compared` / `screenChanged` / `waitedMs`。
+  画面没变时 700ms 后自动再拍一张（躲开冷启动慢的情况）；启动前本来没画面、启动后有了 → 也算 `screenChanged=true`。
+- ✅ `screenChanged=false` 时回 `hint`：「目标 app 可能不支持在虚拟屏显示（SplashActivity 起来即退出），可换 app」。
+- ❌ **不改 `ok` 语义**：`am start` 本身确实成功时仍返回 `ok:true`，不返回 `ok:false / activity_unstable`。
+  原因：① 全量回归的 vscreen 判据就是 `android_vscreen_launch(app=com.android.settings)` 要求 ok，
+  把「app 不兼容副屏」升级成 `ok:false` 会让一个**客观存在的 app 限制**变成回归 FAIL，违背「每批 0 FAIL」；
+  ② 截图相同不等于失败（重进同一个 app、静态页面都会相同），判成失败会产生新的误报。
+  改成「ok 保持 + screenChanged 如实回」后，AI 一次调用就能看出「命令成功但画面没变」，同样省掉那 7 次调用。
+
+**证据（改完重跑要看到）**：`android_vscreen_launch` 的正文含 `组件：`、`displayId=`、`画面变化：是/否`。
+
+---
+
+## 建议 2｜android_vscreen_see 失败只有一句万金油，且不能等
+
+**AI 原话（摘要）**：四次都是同一句 `虚拟屏暂无画面（App 尚未渲染或屏幕刚创建）`，但语义完全不同：
+①刚 create 没首帧 ②launch 后冷启动 ③app 已退出、display 上有任务但无窗口 ④抓帧器坏了。
+只能靠人工 `sleep 4/6/8s` 反复试，每轮多一次 see。
+
+**全采纳**：
+- `see` 新增参数 `waitMs`（0~5000ms，默认 0）：内部每 300ms 重试（最多 10 次），出帧即返回，
+  成功时回 `waitedMs`（真正等了多久）与 `attempts`（试了几次）。
+- 失败时用 `/vscreen/status` 的**真实状态**定性，回 `errorCode` + `displayId` + `hasFrame` + `hint`：
+  - `no_display`：displayId < 0，虚拟屏根本没建；
+  - `not_rendered`：屏在、`hasFrame=false`，一张首帧都没有（刚建屏/冷启动，值得等）；
+  - `no_frame`：屏在、`hasFrame=true` 但现在抓不到帧（app 已退出/无窗口，硬失败，别干等）；
+  - `unavailable`：连 status 都拿不到（桥/服务异常）。
+  （服务端 `/vscreen/status` 本来就回 `hasFrame`，之前插件把它丢了，现在用起来。）
+- 说明：AI 建议的 `no_window` / `capture_failed` 在插件层无法与服务端错误原文区分，
+  所以用 `hasFrame` 这个**真实可判别**的字段代替，不编造分不清的码。
+
+**证据（改完重跑要看到）**：无画面时正文含 `截图失败（not_rendered）` 之类并带 `hasFrame=`、`displayId=`；
+带 `waitMs` 时成功返回里有 `waitedMs`。
+
+---
+
+## 建议 3｜参数取值/命名不统一，第一步就踩空
+
+**AI 原话（摘要）**：① `create` 传 `orientation=0` 直接 `must be a string`；② `key=KEYCODE_BACK` 报「未知按键」；
+③ 同族工具坐标/key 写法混用；④ `create` 成功只回「操作成功。」，不回 displayId/归一化尺寸，还要再调 status。
+
+**全采纳**：
+- `orientation` 改成 `oneOf [string, number]`（已在本机真内核 `@deepseek-ai/dsh-tools 0.2.1-rc.2` 上验证参数 DSL 支持
+  `oneOf` 且能通过编译）：收 `portrait/landscape`、`0/1`、`"0"/"1"`，非法值报错时**列出可接受值**。
+- `android_vscreen_key` 增加别名表：`KEYCODE_BACK`、`BACK`、`back`、`4` 都归一成 back；home/enter/menu/
+  volume_up/volume_down/app_switch 同理；未知值返回 `accepted:[...]` 而不是一句「未知按键」。
+  `key` 参数也放宽成 string|number（允许直接传 4）。
+- `create` 返回补全 `displayId / width / height / dpi / reused`，并渲染成
+  「虚拟屏已就绪：displayId=11，720x1280 @320dpi」——省掉 create 后的那次 status 调用。
+- `status` 顺带把服务端的 `hasFrame` 透出来（渲染成「画面：已有首帧/暂无首帧」）。
+- 坐标风格（vscreen 用绝对像素、a11y 用 fx/fy）是**两套能力的真实差异**（副屏尺寸由 create 决定，插件已知，
+  所以绝对像素是对的），不改；已在 description 里注明「推荐先 see 拿 scaleX/Y」。
+
+**证据（改完重跑要看到）**：`orientation=0` 与 `orientation:"portrait"` 都能建屏；`key=KEYCODE_BACK` 成功；
+`create` 正文含 `displayId=` 与 `720x1280@320`。
+
+---
+
+## 四、改后自由复测（2026-10-18 08:54，同一 prompt 再让 AI 自由用一遍）
+
+- 报告：`ai-vscreen/review-after.txt`（改前原报告已备份为 `review-before.txt`）。
+- **新字段被 AI 直接引用**：`create … orientation=0 → displayId=14，720x1280 @320dpi，朝向 portrait`；
+  `status … 画面：暂无首帧`；`see waitMs=3000 → path=…6367 bytes`；`launch → package/component/displayId + 画面变化：是`。
+- 这次复测暴露了 3 个**更深**的问题（本轮不修，留档下一轮）：
+  1. `launch` 的「画面变化：是」无法区分「首帧到达但是纯白」与「真的画出界面」（CSDN 这次是白屏闪过就退）；
+     建议加 `firstFrame`(blank/content/absent)、`foregroundActivity`、`appExited`、`exitedAfterMs`，用唯一色数判空白帧；
+  2. `tap`/`swipe` 被 InputDispatcher 丢弃（`Dropping event because there is no touchable window …`）时仍回「操作成功。」，
+     建议加 `dropped`/`reason`/`hitWindow`/前后帧哈希；
+  3. `key` 两回（KEYCODE_BACK 与 back 别名）都回「虚拟屏服务超时」，但 logcat 显示按键**实际落到了 displayId=0 的主屏**；
+     这是服务端（jar）注入的 fallback 行为，**插件层改不了**，需要改 vscreen core；建议短超时 + 禁止跨 display fallback +
+     `injected/dropped` 如实回传，`status` 加 `foregroundPackage/resumedActivity/activityCount/frameBlank`。
+- 不本轮修的理由：第 1/2 条要再改插件并重编 + 再跑一次全量（用户已要求「最后全量」且已全绿）；第 3 条属 App/jar 侧，
+  超出「只改 release-src/plugins」的范围。三条都已落档，下一轮可直接接。
+
+## 不采纳项
+
+- 「launch 失败时返回 `ok:false / activity_unstable`」——理由见建议 1（会破坏回归判据、且把 app 限制误报成插件失败）。
+- 「see 的 `no_window` / `capture_failed` 错误码」——插件层拿不到能区分这两者的真实信号，改用 `hasFrame` 判别，
+  不编造分不清的状态码。
+
+## 兼容性说明
+
+- **只改 `release-src/plugins/dsh-tool-vscreen/lib/index.js`**，vscreen 的 jar / App Java 一行未动。
+- 新增字段全部写进各自 `output.schema`（`additionalProperties:false`）；旧字段语义不变（`ok/error/displayId/...`）。
+- `launch` 的 `ok:true` 语义保持不变（全量回归 vscreen 判据依赖它）。
+- `see` 的默认行为不变（`waitMs` 缺省 0 = 只试一次），只在调用方显式要等时才轮询。

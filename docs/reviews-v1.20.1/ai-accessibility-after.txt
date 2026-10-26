@@ -1,0 +1,42 @@
+DSH 无障碍插件真实调用记录
+设备：Android API 35，屏幕 720x1570；App：com.deepseek.harness 1.20.0
+
+第一部分：工具调用记录（工具名 | 结果 | 摘要）
+android_a11y_status | ok | running=true；服务组件 com.deepseek.harness/.AccessibilityService；当时前台 com.android.systemui；可读控件 88；读屏 / 手势注入 / 截图 均可用；Android API 35
+android_app(launch com.deepseek.harness) | ok | exit 0；输出为标准 monkey/launcher 日志（Events injected: 1），返回体本身不含包名确认行
+android_app(current) | ok | mFocusedApp=ActivityRecord{a2befc8 u0 com.deepseek.harness/.MainActivity t1941}，确认已在前台
+android_screen(主控台) | ok | 前台 com.deepseek.harness；45 节点；含 DEEPSEEK HARNESS / 1.20.0 / 引擎运行中 / 会话管理 / 会话修复 / 运行环境 / AI 浏览器 / 悬浮球 / 授予权限（已授权 7 / 8）/ 插件（已启用 7 / 11）；另有 [43] DeepSeek Harness (162,831 394x59)、[44] 正在启动 DeepSeek Harness... (109,942 501x89) 两个节点，截图里根本看不到
+android_see | ok | path=/storage/emulated/0/DeepSeekHarness/screenshots/screen-1792284685931.png；720x1570；152366 bytes
+bash(PNG 校验) | ok | file: PNG image data, 720 x 1570, 8-bit/color RGBA, non-interlaced；前 8 字节=89 50 4e 47 0d 0a 1a 0a；mtime 2026-10-18 08:51 与截图时刻一致
+android_tap(插件) | ok | 方式 node-text；命中 插件 (36,1498 516x38)；nodeIndex=39；clickableAncestor=是；pageChanged=是；newTitle=‹ 控制台
+android_screen(插件页) | ok | 38 节点；标题 插件；返回键 ‹ 控制台；插件列表 · 已启用 7 / 11；dsh-tool-browser / dsh-tool-vscreen / dsh-tool-accessibility / dsh-tool-android / dsh-tool-shizuku / dsh-llm-pi-ai 为已启用，dsh-session-telemetry-otel / dsh-session-log-download / dsh-pwsh-sandbox / dsh-bash-sandbox 为已关闭；前后差异：主控台 45 节点（会话/系统清单）→ 插件页 38 节点（插件清单）
+android_scroll(down) | ok | 方式 node；内容变化 是（节点数 38→39）；首文本 ‹ 控制台 → 插件列表 · 已启用 7 / 11
+android_screen(滚动后) | ok | 39 节点；dsh-tool-browser y 373→111、插件列表标题 y 303→64；新增 dsh-sandbox 与「重启引擎生效」按钮 (36,1474 648x72)，确认真滚动而非假返回
+android_swipe(0.5,0.7→0.5,0.4,300ms) | ok(无位移) | 滑动已执行；方向 up；内容变化 否（未检测到位移，已到底部——不是注入失败）；首文本前后未变
+android_scroll(up) | ok | 39→38；首文本 插件列表 · 已启用 7 / 11 → ‹ 控制台
+android_swipe(0.5,0.72→0.5,0.42,400ms) | ok | 内容变化 是（节点数 38→39）；首文本 ‹ 控制台 → 插件列表 · 已启用 7 / 11；与上一次同向滑动对比，证明手势注入真实生效
+android_hold(0.5,0.85,600ms) | ok | 仅返回「操作成功。」；无落点像素、无实际按住时长、无命中控件回显
+android_touch(down, finger0, 0.5/0.85) | ok | 仅返回「操作成功。」；无落点/时长回显
+android_touch_status | ok | 手指 0 像素(360,1335) 分数(0.5,0.8503184914588928) 已按住 1431ms；上限 30000ms、最多 8 指、屏幕 720x1570
+android_touch(up, finger0) | ok | 仅返回「操作成功。」；未说明是否真的抬起
+android_touch_status(up 后) | ok | 当前没有按住的虚拟手指；抬起确认成功
+android_tap(‹ 控制台) | ok | 方式 node-text；pageChanged=是；newTitle=DEEPSEEK HARNESS；该次返回未给命中 bounds/nodeIndex
+android_screen(回主控台) | ok | 45 节点；与首次主控台完全一致（会话管理 / 会话修复 / 运行环境 / 插件…），App 未留在子页面
+android_see(第二次) | ok | path=/storage/emulated/0/DeepSeekHarness/screenshots/screen-1792284712793.png；720x1570；201126 bytes
+
+第二部分：改进建议
+
+## 建议 1
+问题：启动遮罩的幽灵节点常驻无障碍树。主控台 android_screen 返回 [43] DeepSeek Harness (162,831 394x59)、[44] 正在启动 DeepSeek Harness... (109,942 501x89)，切到插件页后变成 [36]/[37]，坐标一模一样，但两张 android_see 截图（screen-1792284685931.png、screen-1792284712793.png）里都没有这块遮罩。也就是说节点在、像素不在，且跨页面残留。
+建议改法：android_screen 输出增加 visible 字段（bounds 是否在可视区、alpha 是否 >0、节点是否 attached），默认过滤掉不可见节点，或提供 includeInvisible=false 参数；android_tap / android_find 的文本匹配命中不可见节点时标记 note="matched-invisible"，而不是直接点击。
+影响：本次为排除这行「正在启动」误判，多花了 1 次 android_see + 1 次交叉比对；若不改，任何按文本找元素的自动化都可能点到幽灵节点后误报「点了没反应/功能坏」，也容易误判引擎卡在启动态。
+
+## 建议 2
+问题：手势类工具成功时返回信息过少，无法自证。android_hold(durationMs=600, fx=0.5, fy=0.85) 只回「操作成功。」；android_touch down/up 同样只有「操作成功。」。唯一给出落点的是 android_touch_status：像素(360,1335) 已按住 1431ms——但 1431ms 是「按下到查询」的累计时长，和请求的 600ms 对不上，读者无法区分是工具没按 600ms 执行还是查询前又等了 1.4 秒。
+建议改法：hold/touch/tap 成功返回带 resolvedX/resolvedY、requestedMs、heldMs、hitNode（或 "no-node"）；android_touch_status 增加 lastHoldMs（本次手势实际时长）与 heldMs（累计）两个字段；up 成功时回 released=true。
+影响：本次 android_hold 之后为了拿到落点证据额外调了 android_touch_down + touch_status + up + touch_status 共 4 次（其中 2 次只为取证）；补齐字段后每个手势可省 1–2 次调用，也避免把「1431ms」误读成工具没遵守 600ms 参数而误报 bug。
+
+## 建议 3
+问题：滚动/滑动返回的「无变化」与「首文本」语义容易误读，且不回显位移量。android_swipe(0.5,0.7→0.5,0.4) 返回「内容变化：否（未检测到位移，已到底部——不是注入失败）」；同一方向在 android_scroll(up) 之后重做则返回「内容变化：是（38→39）」。android_scroll(down) 的「首文本 ‹ 控制台 → 插件列表 · 已启用 7 / 11」实际只是顶部标题行被裁出视口，不代表内容区滚动量；并且 scroll 只给了节点数变化，没有 scrolledPx。
+建议改法：scroll/swipe 返回增加 scrolledPx（或 firstVisibleIndex 前后值）与 atEdge 明确取值 top/bottom/none；把「首文本」改名为「视口首节点文本」并只在真正进入视口时更新；无位移时直接给出 atEdge=bottom，同时 android_scroll 也回显 direction 对应的轴向。
+影响：本次为了区分「注入失败」和「已经到底」多调 1 次 android_scroll(up) + 1 次 android_swipe + 2 次 android_screen（4 次调用）；给出 scrolledPx/atEdge 后 1 次即可判定，也不会把标题被裁当成内容滚动成功、把已到底当成手势失灵而重复注入。
